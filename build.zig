@@ -27,4 +27,40 @@ pub fn build(b: *std.Build) void {
         const test_step = b.step("test", "Run tests");
         test_step.dependOn(&run_mp4_tests.step);
     }
+
+    {
+        const examples = [_]struct {
+            file: []const u8,
+            name: []const u8,
+        }{
+            .{ .file = "examples/mp4/01-mp4-to-annexb.zig", .name = "mp4_to_annexb" },
+        };
+
+        for (examples) |ex| {
+            const exe = b.addExecutable(.{
+                .name = ex.name,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(ex.file),
+                    .target = target,
+                    .optimize = .ReleaseSafe,
+                    .imports = &.{
+                        .{ .name = "mp4", .module = mp4 },
+                    },
+                }),
+            });
+
+            b.installArtifact(exe);
+
+            const run_cmd = b.addRunArtifact(exe);
+            run_cmd.step.dependOn(b.getInstallStep());
+            if (b.args) |args| {
+                run_cmd.addArgs(args);
+            }
+
+            const run_step = b.step(ex.name, ex.file);
+            run_step.dependOn(&run_cmd.step);
+        }
+    }
+        }
+    }
 }

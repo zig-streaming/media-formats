@@ -69,7 +69,7 @@ pub fn main() !void {
     var trak: ?*Box.Trak = null;
     for (reader.moov.traks.items) |*trak2| {
         switch (trak2.codec()) {
-            .h264, .hevc => trak = trak2,
+            .h264, .h265 => trak = trak2,
             else => continue,
         }
     }

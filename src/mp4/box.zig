@@ -1,4 +1,5 @@
 const std = @import("std");
+const Codec = @import("media").Codec;
 
 const Allocator = std.mem.Allocator;
 const Reader = std.Io.Reader;
@@ -67,8 +68,6 @@ pub const Error = BoxError || WriteError;
 
 /// The type of a track, determined by the handler type in the Hdlr box.
 pub const TrakType = enum { video, audio, hint, unknown };
-
-pub const Codec = enum { h264, hevc, aac, unknown };
 
 /// Represents the header of an MP4 box.
 pub const Header = struct {
@@ -163,7 +162,9 @@ pub const Ftyp = struct {
         try header.write(writer);
         _ = try writer.write(&self.major_brand);
         try writer.writeInt(u32, self.minor_version, .big);
-        try writer.writeSliceEndian([4]u8, self.compatible_brands.items, .big);
+        for (self.compatible_brands.items) |brand| {
+            _ = try writer.write(&brand);
+        }
     }
 
     pub fn deinit(self: *Ftyp, allocator: Allocator) void {
@@ -1163,7 +1164,7 @@ pub const VideoSampleEntry = struct {
                     };
                     sample_entry.codec = switch (tag) {
                         .avcC => .h264,
-                        .hvcC => .hevc,
+                        .hvcC => .h265,
                         else => unreachable,
                     };
                 },
@@ -1179,7 +1180,7 @@ pub const VideoSampleEntry = struct {
     pub fn write(self: *const VideoSampleEntry, writer: *std.Io.Writer) !void {
         const box_type: BoxType = switch (self.codec) {
             .h264 => .avc1,
-            .hevc => .hvc1,
+            .h265 => .hvc1,
             else => return error.InvalidVideoSampleEntry,
         };
 
@@ -3911,7 +3912,7 @@ test "VideoSampleEntry: parses hvc1 with hvcC config" {
     var entry = try VideoSampleEntry.parse(allocator, header, &reader);
     defer entry.deinit(allocator);
 
-    try std.testing.expectEqual(.hevc, entry.codec);
+    try std.testing.expectEqual(.h265, entry.codec);
     try std.testing.expectEqual(@as(u16, 1), entry.data_reference_index);
     try std.testing.expectEqual(@as(u16, 1920), entry.width);
     try std.testing.expectEqual(@as(u16, 1080), entry.height);
@@ -3949,7 +3950,7 @@ test "VideoSampleEntry: serialize-parse avc1 with avcC config" {
 test "VideoSampleEntry: serialize-parse hvc1 with hvcC config" {
     const allocator = std.testing.allocator;
     var entry = VideoSampleEntry{
-        .codec = .hevc,
+        .codec = .h265,
         .data_reference_index = 1,
         .width = 1920,
         .height = 1080,

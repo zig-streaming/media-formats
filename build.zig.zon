@@ -1,9 +1,14 @@
 .{
     .name = .media_formats,
     .version = "0.0.0",
+    .dependencies = .{
+        .media = .{
+            .url = "git+https://github.com/zig-streaming/media.git#9acf9420a48b18aa432ed3cfe597c81b32ae2077",
+            .hash = "media-0.0.0-qc-dCLTcAADZ9354gNh18Ymfu30I79W5jT6uhBsyYXsk",
+        },
+    },
     .fingerprint = 0x6c6b3c756160e6ed,
     .minimum_zig_version = "0.15.2",
-    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",

@@ -1,6 +1,6 @@
 const std = @import("std");
 const Reader = @import("reader.zig");
-const Box = @import("mp4").Box;
+const Box = @import("formats").mp4.Box;
 
 const H264ParameterSetIterator = struct {
     data: []const u8,

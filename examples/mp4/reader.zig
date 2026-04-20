@@ -1,5 +1,5 @@
 const std = @import("std");
-const mp4 = @import("mp4");
+const mp4 = @import("formats").mp4;
 
 const Reader = @This();
 const Box = mp4.Box;

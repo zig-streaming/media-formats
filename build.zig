@@ -4,11 +4,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const media = b.dependency("media", .{ .target = target, .optimize = optimize });
+
     const mp4 = b.addModule("mp4", .{
         .root_source_file = b.path("src/mp4/mp4.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{},
+        .imports = &.{
+            .{ .name = "media", .module = media.module("media") },
+        },
     });
 
     const mod = b.addModule("media-formats", .{
@@ -44,7 +48,7 @@ pub fn build(b: *std.Build) void {
                     .target = target,
                     .optimize = .ReleaseSafe,
                     .imports = &.{
-                        .{ .name = "mp4", .module = mp4 },
+                        .{ .name = "formats", .module = mod },
                     },
                 }),
             });
@@ -59,8 +63,6 @@ pub fn build(b: *std.Build) void {
 
             const run_step = b.step(ex.name, ex.file);
             run_step.dependOn(&run_cmd.step);
-        }
-    }
         }
     }
 }

@@ -2230,12 +2230,13 @@ test "Mvhd: rejects invalid box size" {
 
 test "Moov: parse moov" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
-    var fs = try std.fs.cwd().openFile("fixtures/moov.bin", .{ .mode = .read_only });
-    defer fs.close();
+    var fs = try std.Io.Dir.cwd().openFile(io, "fixtures/moov.bin", .{ .mode = .read_only });
+    defer fs.close(io);
 
     var buffer: [128]u8 = @splat(0);
-    var fs_reader = fs.reader(&buffer);
+    var fs_reader = fs.reader(io, &buffer);
     const reader = &fs_reader.interface;
 
     const header = try Header.parse(reader);
@@ -2270,12 +2271,13 @@ test "Moov: parse moov" {
 test "Moov: allocation error" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
     const allocator = failing_allocator.allocator();
+    const io = std.testing.io;
 
-    var fs = try std.fs.cwd().openFile("fixtures/moov.bin", .{ .mode = .read_only });
-    defer fs.close();
+    var fs = try std.Io.Dir.cwd().openFile(io, "fixtures/moov.bin", .{ .mode = .read_only });
+    defer fs.close(io);
 
     var buffer: [64]u8 = undefined;
-    var fs_reader = fs.reader(&buffer);
+    var fs_reader = fs.reader(io, &buffer);
     const reader = &fs_reader.interface;
 
     const header = try Header.parse(reader);
@@ -4110,12 +4112,13 @@ test "AudioSampleEntry: serialize-parse mp4a with esds config" {
 
 test "Moov: serialize-parse" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
-    var fs = try std.fs.cwd().openFile("fixtures/moov.bin", .{ .mode = .read_only });
-    defer fs.close();
+    var fs = try std.Io.Dir.cwd().openFile(io, "fixtures/moov.bin", .{ .mode = .read_only });
+    defer fs.close(io);
 
     var buffer: [128]u8 = @splat(0);
-    var fs_reader = fs.reader(&buffer);
+    var fs_reader = fs.reader(io, &buffer);
     const reader = &fs_reader.interface;
 
     const header = try Header.parse(reader);

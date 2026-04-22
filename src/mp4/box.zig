@@ -10,6 +10,8 @@ pub const BoxType = enum(u32) {
     mvhd = 0x6D766864,
     trak = 0x7472616B,
     mvex = 0x6D766578,
+    mehd = 0x6D656864,
+    trex = 0x74726578,
     tkhd = 0x746B6864,
     mdia = 0x6D646961,
     mdhd = 0x6D646864,
@@ -200,7 +202,7 @@ pub const Moov = struct {
             switch (inner_header.type) {
                 .mvhd => mvhd = try Mvhd.parse(inner_header, reader),
                 .trak => try traks.append(allocator, try Trak.parse(allocator, inner_header, reader)),
-                else => {},
+                else => try reader.discardAll(inner_header.payloadSize()),
             }
         }
 
@@ -320,7 +322,7 @@ pub const Trak = struct {
             switch (inner_header.type) {
                 .tkhd => tkhd = try Tkhd.parse(reader, inner_header),
                 .mdia => mdia = try Mdia.parse(allocator, inner_header, reader),
-                else => reader.toss(inner_header.payloadSize()),
+                else => try reader.discardAll(inner_header.payloadSize()),
             }
         }
 
@@ -387,9 +389,124 @@ pub const Trak = struct {
 };
 
 pub const Mvex = struct {
+    mehd: ?Mehd = null,
+    trex: std.ArrayList(Trex) = .empty,
+
     pub fn size(self: *const Mvex) usize {
-        _ = self;
-        return Header.box_header_size;
+        var trex_size: usize = 0;
+        for (self.trex.items) |*trex| trex_size += trex.size();
+        return Header.box_header_size + trex_size + if (self.mehd) |*box| box.size() else 0;
+    }
+
+    pub fn parse(allocator: Allocator, reader: *Reader, header: Header) !Mvex {
+        var offset: usize = 0;
+        var mvex = Mvex{ .mehd = null, .trex = .empty };
+        errdefer mvex.deinit(allocator);
+
+        while (offset < header.payloadSize()) {
+            const inner_header = try Header.parse(reader);
+            offset += inner_header.size;
+
+            switch (inner_header.type) {
+                .mehd => mvex.mehd = try Mehd.parse(reader, inner_header),
+                .trex => try mvex.trex.append(allocator, try Trex.parse(reader, inner_header)),
+                else => try reader.discardAll(inner_header.payloadSize()),
+            }
+        }
+
+        return mvex;
+    }
+
+    pub fn write(self: *const Mvex, writer: *std.Io.Writer) !void {
+        const header = Header.new(.mvex, self.size());
+        try header.write(writer);
+        if (self.mehd) |*box| try box.write(writer);
+        for (self.trex.items) |*trex| try trex.write(writer);
+    }
+
+    pub fn deinit(self: *Mvex, allocator: Allocator) void {
+        self.trex.deinit(allocator);
+    }
+};
+
+pub const Mehd = struct {
+    version: u8,
+    fragment_duration: u64,
+
+    pub fn size(self: *const Mehd) usize {
+        return Header.full_box_header_size + (self.version + 1) * 4;
+    }
+
+    pub fn parse(reader: *Reader, header: Header) !Mehd {
+        var mhed = Mehd{ .version = try reader.takeByte(), .fragment_duration = 0 };
+        if (mhed.size() != header.size) return error.InvalidMvhdBox;
+
+        try reader.discardAll(3); // flags
+
+        if (mhed.version == 1) {
+            mhed.fragment_duration = try reader.takeInt(u64, .big);
+        } else {
+            mhed.fragment_duration = try reader.takeInt(u32, .big);
+        }
+
+        return mhed;
+    }
+
+    pub fn write(self: *const Mehd, writer: *std.Io.Writer) !void {
+        const header = Header.new(.mehd, self.size());
+        try header.write(writer);
+        try writer.writeByte(self.version);
+        try writer.writeInt(u24, 0, .big); // flags
+
+        if (self.version == 1) {
+            try writer.writeInt(u64, self.fragment_duration, .big);
+        } else {
+            try writer.writeInt(u32, @intCast(self.fragment_duration), .big);
+        }
+    }
+};
+
+pub const Trex = struct {
+    track_id: u32,
+    default_sample_description_index: u32,
+    default_sample_duration: u32,
+    default_sample_size: u32,
+    default_sample_flags: u32,
+
+    pub fn size(_: *const Trex) usize {
+        return Header.full_box_header_size + 20;
+    }
+
+    pub fn parse(reader: *Reader, header: Header) !Trex {
+        var trex = Trex{
+            .track_id = 0,
+            .default_sample_description_index = 0,
+            .default_sample_duration = 0,
+            .default_sample_size = 0,
+            .default_sample_flags = 0,
+        };
+
+        if (trex.size() != header.size) return error.InvalidMvhdBox;
+
+        try reader.discardAll(4); // version + flags
+        trex.track_id = try reader.takeInt(u32, .big);
+        trex.default_sample_description_index = try reader.takeInt(u32, .big);
+        trex.default_sample_duration = try reader.takeInt(u32, .big);
+        trex.default_sample_size = try reader.takeInt(u32, .big);
+        trex.default_sample_flags = try reader.takeInt(u32, .big);
+
+        return trex;
+    }
+
+    pub fn write(self: *const Trex, writer: *std.Io.Writer) !void {
+        const header = Header.new(.trex, self.size());
+        try header.write(writer);
+        try writer.writeInt(u32, 0, .big); // version + flags
+        try writer.writeInt(u32, self.track_id, .big);
+        try writer.writeInt(u32, self.default_sample_description_index, .big);
+        try writer.writeInt(u32, self.default_sample_duration, .big);
+        try writer.writeInt(u32, self.default_sample_size, .big);
+        try writer.writeInt(u32, self.default_sample_flags, .big);
     }
 };
 
@@ -4034,4 +4151,170 @@ test "Moov: serialize-parse" {
     try std.testing.expectEqual(moov.traks.items.len, moov2.traks.items.len);
     try std.testing.expectEqual(moov.traks.items[0].timescale(), moov2.traks.items[0].timescale());
     try std.testing.expectEqual(moov.traks.items[1].timescale(), moov2.traks.items[1].timescale());
+}
+
+test "Mhed: version 0 serialize-parse" {
+    const allocator = std.testing.allocator;
+    const mhed = Mehd{ .version = 0, .fragment_duration = 5000 };
+
+    var wa: std.Io.Writer.Allocating = .init(allocator);
+    defer wa.deinit();
+    try mhed.write(&wa.writer);
+    try wa.writer.flush();
+    try std.testing.expectEqual(mhed.size(), wa.writer.buffered().len);
+    try std.testing.expectEqual(@as(usize, 16), mhed.size()); // 12 + (0+1)*4
+
+    var reader = Reader.fixed(wa.writer.buffered());
+    const header = try Header.parse(&reader);
+    const mhed2 = try Mehd.parse(&reader, header);
+
+    try std.testing.expectEqual(mhed.version, mhed2.version);
+    try std.testing.expectEqual(mhed.fragment_duration, mhed2.fragment_duration);
+}
+
+test "Mhed: version 1 serialize-parse" {
+    const allocator = std.testing.allocator;
+    const mhed = Mehd{ .version = 1, .fragment_duration = 0x1_0000_0000 };
+
+    var wa: std.Io.Writer.Allocating = .init(allocator);
+    defer wa.deinit();
+    try mhed.write(&wa.writer);
+    try wa.writer.flush();
+    try std.testing.expectEqual(mhed.size(), wa.writer.buffered().len);
+    try std.testing.expectEqual(@as(usize, 20), mhed.size()); // 12 + (1+1)*4
+
+    var reader = Reader.fixed(wa.writer.buffered());
+    const header = try Header.parse(&reader);
+    const mhed2 = try Mehd.parse(&reader, header);
+
+    try std.testing.expectEqual(mhed.version, mhed2.version);
+    try std.testing.expectEqual(mhed.fragment_duration, mhed2.fragment_duration);
+}
+
+test "Mhed: rejects invalid size" {
+    // size = 15, but version 0 requires 16
+    const data = [_]u8{
+        0x00, 0x00, 0x00, 0x0F, // size = 15
+        'm', 'h', 'e', 'd', // type = mhed
+        0x00, // version = 0
+    };
+    var reader = Reader.fixed(&data);
+    const header = try Header.parse(&reader);
+    try std.testing.expectError(error.InvalidMvhdBox, Mehd.parse(&reader, header));
+}
+
+test "Trex: serialize-parse" {
+    const allocator = std.testing.allocator;
+    const trex = Trex{
+        .track_id = 1,
+        .default_sample_description_index = 1,
+        .default_sample_duration = 512,
+        .default_sample_size = 200,
+        .default_sample_flags = 0x10000,
+    };
+
+    var wa: std.Io.Writer.Allocating = .init(allocator);
+    defer wa.deinit();
+    try trex.write(&wa.writer);
+    try wa.writer.flush();
+    try std.testing.expectEqual(trex.size(), wa.writer.buffered().len);
+    try std.testing.expectEqual(@as(usize, 32), trex.size()); // 12 + 20
+
+    var reader = Reader.fixed(wa.writer.buffered());
+    const header = try Header.parse(&reader);
+    const trex2 = try Trex.parse(&reader, header);
+
+    try std.testing.expectEqual(trex.track_id, trex2.track_id);
+    try std.testing.expectEqual(trex.default_sample_description_index, trex2.default_sample_description_index);
+    try std.testing.expectEqual(trex.default_sample_duration, trex2.default_sample_duration);
+    try std.testing.expectEqual(trex.default_sample_size, trex2.default_sample_size);
+    try std.testing.expectEqual(trex.default_sample_flags, trex2.default_sample_flags);
+}
+
+test "Trex: rejects invalid size" {
+    // size = 31, but trex is always 32
+    const data = [_]u8{
+        0x00, 0x00, 0x00, 0x1F, // size = 31
+        't', 'r', 'e', 'x', // type = trex
+        0x00, 0x00, 0x00, 0x00, // version + flags
+    };
+    var reader = Reader.fixed(&data);
+    const header = try Header.parse(&reader);
+    try std.testing.expectError(error.InvalidMvhdBox, Trex.parse(&reader, header));
+}
+
+test "Mvex: serialize-parse with mehd and single trex" {
+    const allocator = std.testing.allocator;
+
+    var mvex = Mvex{ .mehd = Mehd{ .version = 0, .fragment_duration = 10000 }, .trex = .empty };
+    defer mvex.deinit(allocator);
+    try mvex.trex.append(allocator, Trex{
+        .track_id = 1,
+        .default_sample_description_index = 1,
+        .default_sample_duration = 512,
+        .default_sample_size = 0,
+        .default_sample_flags = 0,
+    });
+
+    var wa: std.Io.Writer.Allocating = .init(allocator);
+    defer wa.deinit();
+    try mvex.write(&wa.writer);
+    try wa.writer.flush();
+    try std.testing.expectEqual(mvex.size(), wa.writer.buffered().len);
+    try std.testing.expectEqual(@as(usize, 56), mvex.size()); // 8 + 16 (mehd v0) + 32 (trex)
+
+    var reader = Reader.fixed(wa.writer.buffered());
+    const header = try Header.parse(&reader);
+    var mvex2 = try Mvex.parse(allocator, &reader, header);
+    defer mvex2.deinit(allocator);
+
+    try std.testing.expect(mvex2.mehd != null);
+    try std.testing.expectEqual(mvex.mehd.?.fragment_duration, mvex2.mehd.?.fragment_duration);
+    try std.testing.expectEqual(mvex.mehd.?.version, mvex2.mehd.?.version);
+    try std.testing.expectEqual(@as(usize, 1), mvex2.trex.items.len);
+    try std.testing.expectEqual(mvex.trex.items[0].track_id, mvex2.trex.items[0].track_id);
+    try std.testing.expectEqual(mvex.trex.items[0].default_sample_duration, mvex2.trex.items[0].default_sample_duration);
+}
+
+test "Mvex: serialize-parse without mehd, multiple trex entries" {
+    const allocator = std.testing.allocator;
+
+    var mvex = Mvex{ .mehd = null, .trex = .empty };
+    defer mvex.deinit(allocator);
+    try mvex.trex.append(allocator, Trex{
+        .track_id = 1,
+        .default_sample_description_index = 1,
+        .default_sample_duration = 512,
+        .default_sample_size = 100,
+        .default_sample_flags = 0,
+    });
+    try mvex.trex.append(allocator, Trex{
+        .track_id = 2,
+        .default_sample_description_index = 1,
+        .default_sample_duration = 1024,
+        .default_sample_size = 0,
+        .default_sample_flags = 0x10000,
+    });
+
+    var wa: std.Io.Writer.Allocating = .init(allocator);
+    defer wa.deinit();
+    try mvex.write(&wa.writer);
+    try wa.writer.flush();
+    try std.testing.expectEqual(mvex.size(), wa.writer.buffered().len);
+    try std.testing.expectEqual(@as(usize, 72), mvex.size()); // 8 + 32 + 32
+
+    var reader = Reader.fixed(wa.writer.buffered());
+    const header = try Header.parse(&reader);
+    var mvex2 = try Mvex.parse(allocator, &reader, header);
+    defer mvex2.deinit(allocator);
+
+    try std.testing.expect(mvex2.mehd == null);
+    try std.testing.expectEqual(@as(usize, 2), mvex2.trex.items.len);
+    for (mvex.trex.items, mvex2.trex.items) |t1, t2| {
+        try std.testing.expectEqual(t1.track_id, t2.track_id);
+        try std.testing.expectEqual(t1.default_sample_description_index, t2.default_sample_description_index);
+        try std.testing.expectEqual(t1.default_sample_duration, t2.default_sample_duration);
+        try std.testing.expectEqual(t1.default_sample_size, t2.default_sample_size);
+        try std.testing.expectEqual(t1.default_sample_flags, t2.default_sample_flags);
+    }
 }

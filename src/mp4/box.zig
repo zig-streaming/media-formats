@@ -1236,10 +1236,12 @@ pub const VideoSampleEntry = struct {
     data_reference_index: u16,
     width: u16,
     height: u16,
-    codec_config: CodecConfig,
+    codec_config: []u8,
+    tag: u32 = 0,
 
     pub fn size(self: *const VideoSampleEntry) usize {
-        return Header.box_header_size + 78 + self.codec_config.size();
+        const codec_config_size = self.codec_config.len + Header.box_header_size;
+        return Header.box_header_size + 78 + codec_config_size;
     }
 
     pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !VideoSampleEntry {
@@ -1248,22 +1250,27 @@ pub const VideoSampleEntry = struct {
         _ = try reader.discard(.limited(6)); // reserved
 
         var sample_entry = VideoSampleEntry{
-            .codec = .unknown,
+            .codec = switch (header.type) {
+                .avc1, .avc3 => .h264,
+                .hvc1, .hev1 => .h265,
+                else => .unknown,
+            },
             .data_reference_index = 0,
             .width = 0,
             .height = 0,
-            .codec_config = .{ .unknown = {} },
+            .codec_config = &.{},
+            .tag = @intFromEnum(header.type),
         };
         errdefer sample_entry.deinit(allocator);
 
         sample_entry.data_reference_index = try reader.takeInt(u16, .big);
 
-        _ = try reader.discard(.limited(16)); // pre_defined + reserved
+        _ = try reader.discardAll(16); // pre_defined + reserved
 
         sample_entry.width = try reader.takeInt(u16, .big);
         sample_entry.height = try reader.takeInt(u16, .big);
 
-        _ = try reader.discard(.limited(50)); // reserved
+        _ = try reader.discardAll(50); // reserved
 
         var offset: usize = 78;
         while (offset < header.payloadSize()) {
@@ -1271,19 +1278,9 @@ pub const VideoSampleEntry = struct {
             offset += inner_header.size;
             if (offset > header.payloadSize()) return error.InvalidVideoSampleEntry;
             switch (inner_header.type) {
-                .avcC, .hvcC => |tag| {
-                    const config = try allocator.alloc(u8, inner_header.payloadSize());
-                    @memcpy(config, try reader.take(inner_header.payloadSize()));
-                    sample_entry.codec_config = switch (tag) {
-                        .avcC => .{ .avc = config },
-                        .hvcC => .{ .hvc = config },
-                        else => unreachable,
-                    };
-                    sample_entry.codec = switch (tag) {
-                        .avcC => .h264,
-                        .hvcC => .h265,
-                        else => unreachable,
-                    };
+                .avcC, .hvcC => {
+                    const config = try reader.take(inner_header.payloadSize());
+                    sample_entry.codec_config = try allocator.dupe(u8, config);
                 },
                 else => _ = try reader.discard(.limited(inner_header.payloadSize())),
             }
@@ -1323,16 +1320,11 @@ pub const VideoSampleEntry = struct {
         try writer.writeInt(u16, 0x0018, .big); // depth
         try writer.writeInt(i16, -1, .big); // pre_defined
 
-        switch (self.codec_config) {
-            .avc => |config| {
-                const config_header = Header.new(.avcC, config.len + 8);
+        switch (self.codec) {
+            .h264, .h265 => |codec| {
+                const config_header = Header.new(if (codec == .h264) .avcC else .hvcC, self.codec_config.len + Header.box_header_size);
                 try config_header.write(writer);
-                try writer.writeAll(config);
-            },
-            .hvc => |config| {
-                const config_header = Header.new(.hvcC, config.len + 8);
-                try config_header.write(writer);
-                try writer.writeAll(config);
+                try writer.writeAll(self.codec_config);
             },
             .unknown => {},
             else => unreachable,
@@ -1340,7 +1332,7 @@ pub const VideoSampleEntry = struct {
     }
 
     pub fn deinit(self: *VideoSampleEntry, allocator: Allocator) void {
-        self.codec_config.deinit(allocator);
+        allocator.free(self.codec_config);
     }
 
     pub fn clone(self: *const VideoSampleEntry, allocator: Allocator) Allocator.Error!VideoSampleEntry {
@@ -1374,14 +1366,16 @@ pub const VideoSampleEntry = struct {
 /// An Audio Sample Entry describes the format of an audio sample in a track, including its codec and any associated configuration data.
 pub const AudioSampleEntry = struct {
     codec: Codec,
+    tag: u32 = 0,
     data_reference_index: u16,
     channelcount: u16 = 2,
     samplesize: u16 = 16,
     samplerate: u32,
-    codec_config: CodecConfig,
+    codec_config: []u8,
 
     pub fn size(self: *const AudioSampleEntry) usize {
-        return Header.box_header_size + 28 + self.codec_config.size();
+        const codec_config_size = self.codec_config.len + Header.box_header_size;
+        return Header.box_header_size + 28 + codec_config_size;
     }
 
     pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !AudioSampleEntry {
@@ -1393,7 +1387,8 @@ pub const AudioSampleEntry = struct {
             .codec = .unknown,
             .data_reference_index = 0,
             .samplerate = 0,
-            .codec_config = .{ .unknown = {} },
+            .tag = 0,
+            .codec_config = &.{},
         };
         errdefer sample_entry.deinit(allocator);
 
@@ -1413,11 +1408,10 @@ pub const AudioSampleEntry = struct {
             if (offset > header.payloadSize()) return error.InvalidAudioSampleEntry;
             switch (inner_header.type) {
                 .esds => {
-                    const config_size = inner_header.payloadSize();
-                    const config = try allocator.alloc(u8, config_size);
-                    @memcpy(config, try reader.take(config_size));
-                    sample_entry.codec_config = .{ .esds = config };
+                    const data = try reader.take(inner_header.payloadSize());
                     sample_entry.codec = .aac;
+                    sample_entry.tag = @intFromEnum(inner_header.type);
+                    sample_entry.codec_config = try allocator.dupe(u8, data);
                 },
                 else => _ = try reader.discard(.limited(inner_header.payloadSize())),
             }
@@ -1447,11 +1441,11 @@ pub const AudioSampleEntry = struct {
         try writer.writeInt(u32, 0, .big); // pre_defined + reserved
         try writer.writeInt(u32, self.samplerate << 16, .big);
 
-        switch (self.codec_config) {
-            .esds => |config| {
-                const config_header = Header.new(.esds, config.len + 8);
+        switch (self.codec) {
+            .aac => {
+                const config_header = Header.new(.esds, self.codec_config.len + 8);
                 try config_header.write(writer);
-                try writer.writeAll(config);
+                try writer.writeAll(self.codec_config);
             },
             .unknown => {},
             else => unreachable,
@@ -1459,7 +1453,7 @@ pub const AudioSampleEntry = struct {
     }
 
     pub fn deinit(self: *AudioSampleEntry, allocator: Allocator) void {
-        self.codec_config.deinit(allocator);
+        allocator.free(self.codec_config);
     }
 
     pub fn clone(self: *const AudioSampleEntry, allocator: Allocator) !AudioSampleEntry {
@@ -1483,28 +1477,6 @@ pub const AudioSampleEntry = struct {
         }
 
         return entry;
-    }
-};
-
-/// CodecConfig represents the codec-specific configuration data for a sample entry, which can vary depending on the codec used (e.g., AVC, HEVC).
-pub const CodecConfig = union(enum) {
-    avc: []u8,
-    hvc: []u8,
-    esds: []u8,
-    unknown: void,
-
-    pub fn size(self: *const CodecConfig) usize {
-        switch (self.*) {
-            .avc, .hvc, .esds => |buf| return Header.box_header_size + buf.len,
-            .unknown => return 0,
-        }
-    }
-
-    pub fn deinit(self: *CodecConfig, allocator: Allocator) void {
-        switch (self.*) {
-            .avc, .hvc, .esds => |codec| allocator.free(codec),
-            .unknown => {},
-        }
     }
 };
 
@@ -2598,7 +2570,7 @@ test "VideoSampleEntry: parses avc1 without codec config" {
     try std.testing.expectEqual(@as(u16, 1), entry.data_reference_index);
     try std.testing.expectEqual(@as(u16, 1920), entry.width);
     try std.testing.expectEqual(@as(u16, 1080), entry.height);
-    try std.testing.expect(entry.codec_config == .unknown);
+    try std.testing.expectEqualSlices(u8, &.{}, entry.codec_config);
 }
 
 test "VideoSampleEntry: parses avc1 with avcC codec config" {
@@ -2627,7 +2599,7 @@ test "VideoSampleEntry: parses avc1 with avcC codec config" {
     try std.testing.expectEqual(@as(u16, 1), entry.data_reference_index);
     try std.testing.expectEqual(@as(u16, 1920), entry.width);
     try std.testing.expectEqual(@as(u16, 1080), entry.height);
-    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x64, 0x00, 0x1F }, entry.codec_config.avc);
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x64, 0x00, 0x1F }, entry.codec_config);
 }
 
 test "VideoSampleEntry: rejects payload too small" {
@@ -2666,7 +2638,7 @@ test "AudioSampleEntry: parses mp4a without codec config" {
     try std.testing.expectEqual(@as(u16, 6), entry.channelcount);
     try std.testing.expectEqual(@as(u16, 16), entry.samplesize);
     try std.testing.expectEqual(@as(u32, 44100), entry.samplerate);
-    try std.testing.expect(entry.codec_config == .unknown);
+    try std.testing.expectEqualSlices(u8, &.{}, entry.codec_config);
 }
 
 test "AudioSampleEntry: parses mp4a with esds codec config" {
@@ -2695,7 +2667,7 @@ test "AudioSampleEntry: parses mp4a with esds codec config" {
     try std.testing.expectEqual(@as(u16, 2), entry.channelcount);
     try std.testing.expectEqual(@as(u16, 16), entry.samplesize);
     try std.testing.expectEqual(@as(u32, 48000), entry.samplerate);
-    try std.testing.expectEqualSlices(u8, &.{ 0xDE, 0xAD, 0xBE, 0xEF }, entry.codec_config.esds);
+    try std.testing.expectEqualSlices(u8, &.{ 0xDE, 0xAD, 0xBE, 0xEF }, entry.codec_config);
 }
 
 test "AudioSampleEntry: rejects payload too small" {
@@ -4033,7 +4005,7 @@ test "VideoSampleEntry: parses hvc1 with hvcC config" {
     try std.testing.expectEqual(@as(u16, 1), entry.data_reference_index);
     try std.testing.expectEqual(@as(u16, 1920), entry.width);
     try std.testing.expectEqual(@as(u16, 1080), entry.height);
-    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x01, 0x60, 0x00 }, entry.codec_config.hvc);
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x01, 0x60, 0x00 }, entry.codec_config);
 }
 
 test "VideoSampleEntry: serialize-parse avc1 with avcC config" {
@@ -4043,7 +4015,7 @@ test "VideoSampleEntry: serialize-parse avc1 with avcC config" {
         .data_reference_index = 1,
         .width = 1920,
         .height = 1080,
-        .codec_config = .{ .avc = try allocator.dupe(u8, &.{ 0x01, 0x64, 0x00, 0x1F }) },
+        .codec_config = try allocator.dupe(u8, &.{ 0x01, 0x64, 0x00, 0x1F }),
     };
     defer entry.deinit(allocator);
 
@@ -4061,7 +4033,7 @@ test "VideoSampleEntry: serialize-parse avc1 with avcC config" {
     try std.testing.expectEqual(entry.codec, entry2.codec);
     try std.testing.expectEqual(entry.width, entry2.width);
     try std.testing.expectEqual(entry.height, entry2.height);
-    try std.testing.expectEqualSlices(u8, entry.codec_config.avc, entry2.codec_config.avc);
+    try std.testing.expectEqualSlices(u8, entry.codec_config, entry2.codec_config);
 }
 
 test "VideoSampleEntry: serialize-parse hvc1 with hvcC config" {
@@ -4071,7 +4043,7 @@ test "VideoSampleEntry: serialize-parse hvc1 with hvcC config" {
         .data_reference_index = 1,
         .width = 1920,
         .height = 1080,
-        .codec_config = .{ .hvc = try allocator.dupe(u8, &.{ 0x01, 0x01, 0x60, 0x00 }) },
+        .codec_config = try allocator.dupe(u8, &.{ 0x01, 0x01, 0x60, 0x00 }),
     };
     defer entry.deinit(allocator);
 
@@ -4089,7 +4061,7 @@ test "VideoSampleEntry: serialize-parse hvc1 with hvcC config" {
     try std.testing.expectEqual(entry.codec, entry2.codec);
     try std.testing.expectEqual(entry.width, entry2.width);
     try std.testing.expectEqual(entry.height, entry2.height);
-    try std.testing.expectEqualSlices(u8, entry.codec_config.hvc, entry2.codec_config.hvc);
+    try std.testing.expectEqualSlices(u8, entry.codec_config, entry2.codec_config);
 }
 
 test "AudioSampleEntry: serialize-parse mp4a with esds config" {
@@ -4100,7 +4072,7 @@ test "AudioSampleEntry: serialize-parse mp4a with esds config" {
         .channelcount = 2,
         .samplesize = 16,
         .samplerate = 48000,
-        .codec_config = .{ .esds = try allocator.dupe(u8, &.{ 0xDE, 0xAD, 0xBE, 0xEF }) },
+        .codec_config = try allocator.dupe(u8, &.{ 0xDE, 0xAD, 0xBE, 0xEF }),
     };
     defer entry.deinit(allocator);
 
@@ -4117,7 +4089,7 @@ test "AudioSampleEntry: serialize-parse mp4a with esds config" {
 
     try std.testing.expectEqual(entry.channelcount, entry2.channelcount);
     try std.testing.expectEqual(entry.samplerate, entry2.samplerate);
-    try std.testing.expectEqualSlices(u8, entry.codec_config.esds, entry2.codec_config.esds);
+    try std.testing.expectEqualSlices(u8, entry.codec_config, entry2.codec_config);
 }
 
 test "Moov: serialize-parse" {

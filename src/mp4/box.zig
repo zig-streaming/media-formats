@@ -1540,7 +1540,7 @@ pub const Stts = struct {
     }
 };
 
-pub const CompositionTimeToSampleEntry = extern struct { count: u32, offset: u32 };
+pub const CompositionTimeToSampleEntry = extern struct { count: u32, delta: u32 };
 
 /// The Composition Time to Sample Box (ctts) provides a compact way to represent the composition time offsets of samples in a track,
 /// which is used for tracks where the decoding order differs from the presentation order (e.g., video tracks with B-frames).
@@ -1589,13 +1589,13 @@ pub const Ctts = struct {
         if (items.len > 0) {
             @branchHint(.likely);
             var item = &items[items.len - 1];
-            if (item.offset == offset) {
+            if (item.delta == offset) {
                 item.count += 1;
                 return;
             }
         }
 
-        try self.samples.append(allocator, .{ .count = 1, .offset = offset });
+        try self.samples.append(allocator, .{ .count = 1, .delta = offset });
     }
 };
 
@@ -1861,9 +1861,9 @@ pub const SampleMetadata = struct {
 // Iterators
 pub const SampleIterator = struct {
     stbl: *const Stbl,
-    stts_iterator: SttsIterator,
+    stts_iterator: DeltaIterator(TimeToSampleEntry),
     stsc_iterator: StscIterator,
-    ctts_iterator: ?CttsIterator = null,
+    ctts_iterator: ?DeltaIterator(CompositionTimeToSampleEntry) = null,
     duration: u64 = 0,
 
     sample_idx: usize = 1,
@@ -1871,14 +1871,14 @@ pub const SampleIterator = struct {
 
     /// Init a sample iterator.
     pub fn init(stbl: *const Stbl) SampleIterator {
-        var ctts_iterator: ?CttsIterator = null;
+        var ctts_iterator: ?DeltaIterator(CompositionTimeToSampleEntry) = null;
         if (stbl.ctts) |*box| {
-            ctts_iterator = CttsIterator.init(box);
+            ctts_iterator = DeltaIterator(CompositionTimeToSampleEntry).init(box.samples.items);
         }
 
         return SampleIterator{
             .stbl = stbl,
-            .stts_iterator = SttsIterator.init(&stbl.stts),
+            .stts_iterator = DeltaIterator(TimeToSampleEntry).init(stbl.stts.samples.items),
             .ctts_iterator = ctts_iterator,
             .stsc_iterator = StscIterator.init(stbl),
         };
@@ -1886,12 +1886,22 @@ pub const SampleIterator = struct {
 
     // Get the next sample, or null if there are no more samples.
     pub fn next(self: *SampleIterator) ?SampleMetadata {
-        if (self.stts_iterator.next()) |delta| {
+        if (self.peek()) |metadata| {
+            @branchHint(.likely);
+            self.skip(1);
+            return metadata;
+        }
+
+        return null;
+    }
+
+    pub fn peek(self: *SampleIterator) ?SampleMetadata {
+        if (self.stts_iterator.peek()) |delta| {
             const dts = self.duration;
             const pts: u64 = blk: {
                 if (self.ctts_iterator) |*iter| {
-                    const offset = iter.next() orelse 0;
-                    if (iter.ctts.version == 1) {
+                    const offset = iter.peek() orelse 0;
+                    if (self.stbl.ctts.?.version == 1) {
                         const signed_offset: i32 = @bitCast(offset);
                         break :blk @intCast(@as(i128, dts) + signed_offset);
                     } else {
@@ -1904,11 +1914,8 @@ pub const SampleIterator = struct {
 
             const is_sync = self.sync();
             const size = self.stbl.stsz.getAt(self.sample_idx - 1);
-            const chunk_id, const chunk_offset = self.stsc_iterator.next(self.sample_idx - 1);
+            const chunk_id, const chunk_offset = self.stsc_iterator.peek();
             const offset = self.chunkOffset(chunk_id) + chunk_offset;
-
-            self.duration += delta;
-            self.sample_idx += 1;
 
             return .{
                 .dts = dts,
@@ -1925,16 +1932,23 @@ pub const SampleIterator = struct {
         return null;
     }
 
+    pub fn skip(self: *SampleIterator, count: u32) void {
+        self.duration += self.stts_iterator.skip(count);
+        if (self.ctts_iterator) |*iter| {
+            _ = iter.skip(count);
+        }
+        self.stsc_iterator.skip(self.sample_idx - 1, count);
+        self.sample_idx += count;
+        if (self.stbl.stss) |*stss| {
+            const items = stss.samples.items;
+            while (self.stss_idx < items.len and items[self.stss_idx] < self.sample_idx) : (self.stss_idx += 1) {}
+        }
+    }
+
     fn sync(self: *SampleIterator) bool {
         if (self.stbl.stss) |*stss| {
             if (self.stss_idx >= stss.samples.items.len) return false;
-
-            if (stss.samples.items[self.stss_idx] == self.sample_idx) {
-                self.stss_idx += 1;
-                return true;
-            }
-
-            return false;
+            return stss.samples.items[self.stss_idx] == self.sample_idx;
         }
 
         return true;
@@ -1949,70 +1963,56 @@ pub const SampleIterator = struct {
     }
 };
 
-const SttsIterator = struct {
-    stts: *const Stts,
-    entry: TimeToSampleEntry,
-    idx: usize = 0,
-    acc: usize = 0,
+fn DeltaIterator(comptime T: type) type {
+    return struct {
+        entries: []const T,
+        idx: usize = 0,
+        entry: T,
 
-    fn init(stts: *const Stts) SttsIterator {
-        return SttsIterator{
-            .stts = stts,
-            .entry = stts.samples.items[0],
-        };
-    }
-
-    fn next(self: *SttsIterator) ?u32 {
-        if (self.idx >= self.stts.length()) {
-            @branchHint(.unlikely);
-            return null;
+        fn init(entries: []const T) @This() {
+            return .{
+                .entries = entries,
+                .entry = entries[0],
+            };
         }
 
-        const delta = self.entry.delta;
+        fn next(self: *@This()) ?u32 {
+            const delta = self.peek();
+            self.skip(1);
+            return delta;
+        }
 
-        self.entry.count -= 1;
-        if (self.entry.count == 0) {
-            self.idx += 1;
-            if (self.idx < self.stts.length()) {
-                self.entry = self.stts.samples.items[self.idx];
+        fn peek(self: *@This()) ?u32 {
+            if (self.idx >= self.entries.len) {
+                @branchHint(.unlikely);
+                return null;
             }
+
+            return self.entry.delta;
         }
 
-        return delta;
-    }
-};
-
-const CttsIterator = struct {
-    ctts: *const Ctts,
-    entry: CompositionTimeToSampleEntry,
-    idx: usize = 0,
-
-    fn init(ctts: *const Ctts) CttsIterator {
-        return CttsIterator{
-            .ctts = ctts,
-            .entry = ctts.samples.items[0],
-        };
-    }
-
-    fn next(self: *CttsIterator) ?u32 {
-        if (self.idx >= self.ctts.samples.items.len) {
-            @branchHint(.unlikely);
-            return null;
-        }
-
-        const offset = self.entry.offset;
-
-        self.entry.count -= 1;
-        if (self.entry.count == 0) {
-            self.idx += 1;
-            if (self.idx < self.ctts.samples.items.len) {
-                self.entry = self.ctts.samples.items[self.idx];
+        fn skip(self: *@This(), count: u32) u64 {
+            var remaining = count;
+            var duration: u64 = 0;
+            while (remaining > 0 and self.idx < self.entries.len) {
+                if (self.entry.count > remaining) {
+                    self.entry.count -= remaining;
+                    duration += remaining * self.entry.delta;
+                    break;
+                } else {
+                    remaining -= self.entry.count;
+                    duration += self.entry.count * self.entry.delta;
+                    self.idx += 1;
+                    if (self.idx < self.entries.len) {
+                        self.entry = self.entries[self.idx];
+                    }
+                }
             }
-        }
 
-        return offset;
-    }
-};
+            return duration;
+        }
+    };
+}
 
 const StscIterator = struct {
     stsc: *const Stsc,
@@ -2037,27 +2037,42 @@ const StscIterator = struct {
     }
 
     fn next(self: *StscIterator, sample_index: usize) struct { u32, u64 } {
-        const chunk_id = self.entry.first_chunk;
-        const chunk_offset = self.chunk_offset;
+        const result = self.peek();
+        self.skip(sample_index, 1);
+        return result;
+    }
 
-        self.entry.samples_per_chunk -= 1;
-        if (self.entry.samples_per_chunk == 0) {
-            self.entry.first_chunk += 1;
-            self.entry.samples_per_chunk = self.entry_samples_per_chunk;
-            self.chunk_offset = 0;
+    fn peek(self: *StscIterator) struct { u32, u64 } {
+        return .{ self.entry.first_chunk, self.chunk_offset };
+    }
 
-            if (self.next_entry) |next_entry| if (self.entry.first_chunk == next_entry.first_chunk) {
-                self.entry = next_entry;
-                self.entry_samples_per_chunk = self.entry.samples_per_chunk;
+    fn skip(self: *StscIterator, sample_index: usize, count: u32) void {
+        var remaining = count;
+        var index = sample_index;
+        while (remaining > 0) {
+            if (self.entry.samples_per_chunk > remaining) {
+                self.entry.samples_per_chunk -= remaining;
+                for (0..remaining) |idx| {
+                    self.chunk_offset += self.stsz.getAt(index + idx);
+                }
+                break;
+            } else {
+                remaining -= self.entry.samples_per_chunk;
+                index += self.entry.samples_per_chunk;
 
-                self.idx += 1;
-                self.next_entry = if (self.idx + 1 < self.stsc.entries.items.len) self.stsc.entries.items[self.idx + 1] else null;
-            };
-        } else {
-            self.chunk_offset += self.stsz.getAt(sample_index);
+                self.entry.first_chunk += 1;
+                self.entry.samples_per_chunk = self.entry_samples_per_chunk;
+                self.chunk_offset = 0;
+
+                if (self.next_entry) |next_entry| if (self.entry.first_chunk == next_entry.first_chunk) {
+                    self.entry = next_entry;
+                    self.entry_samples_per_chunk = next_entry.samples_per_chunk;
+
+                    self.idx += 1;
+                    self.next_entry = if (self.idx + 1 < self.stsc.entries.items.len) self.stsc.entries.items[self.idx + 1] else null;
+                };
+            }
         }
-
-        return .{ chunk_id, chunk_offset };
     }
 };
 
@@ -2442,9 +2457,9 @@ test "Ctts: version 0 parses entries correctly" {
 
     try std.testing.expectEqual(@as(usize, 2), ctts.samples.items.len);
     try std.testing.expectEqual(@as(u32, 3), ctts.samples.items[0].count);
-    try std.testing.expectEqual(@as(u32, 0), ctts.samples.items[0].offset);
+    try std.testing.expectEqual(@as(u32, 0), ctts.samples.items[0].delta);
     try std.testing.expectEqual(@as(u32, 1), ctts.samples.items[1].count);
-    try std.testing.expectEqual(@as(u32, 100), ctts.samples.items[1].offset);
+    try std.testing.expectEqual(@as(u32, 100), ctts.samples.items[1].delta);
     try std.testing.expectEqual(@as(usize, 32), ctts.size()); // 12 + 4 + 2*8
 }
 
@@ -2469,8 +2484,8 @@ test "Ctts: version 1 parses signed offsets" {
     try std.testing.expectEqual(@as(usize, 2), ctts.samples.items.len);
     try std.testing.expectEqual(@as(u32, 3), ctts.samples.items[0].count);
 
-    const offset0: i32 = @bitCast(ctts.samples.items[0].offset);
-    const offset1: i32 = @bitCast(ctts.samples.items[1].offset);
+    const offset0: i32 = @bitCast(ctts.samples.items[0].delta);
+    const offset1: i32 = @bitCast(ctts.samples.items[1].delta);
 
     try std.testing.expectEqual(@as(i32, -2), offset0);
     try std.testing.expectEqual(@as(u32, 1), ctts.samples.items[1].count);
@@ -2918,9 +2933,9 @@ test "SampleIterator: ctts shifts pts" {
 
     var ctts_samples: std.ArrayListUnmanaged(CompositionTimeToSampleEntry) = .empty;
     try ctts_samples.appendSlice(allocator, &.{
-        .{ .count = 1, .offset = 2000 },
-        .{ .count = 1, .offset = 0 },
-        .{ .count = 1, .offset = 1000 },
+        .{ .count = 1, .delta = 2000 },
+        .{ .count = 1, .delta = 0 },
+        .{ .count = 1, .delta = 1000 },
     });
 
     var stsc_entries: std.ArrayListUnmanaged(SampleToChunkEntry) = .empty;
@@ -2966,9 +2981,9 @@ test "SampleIterator: ctts version 1 allows negative offsets" {
 
     var ctts_samples: std.ArrayListUnmanaged(CompositionTimeToSampleEntry) = .empty;
     try ctts_samples.appendSlice(allocator, &.{
-        .{ .count = 1, .offset = 2000 },
-        .{ .count = 1, .offset = @bitCast(@as(i32, -1000)) },
-        .{ .count = 1, .offset = 1000 },
+        .{ .count = 1, .delta = 2000 },
+        .{ .count = 1, .delta = @bitCast(@as(i32, -1000)) },
+        .{ .count = 1, .delta = 1000 },
     });
 
     var stsc_entries: std.ArrayListUnmanaged(SampleToChunkEntry) = .empty;
@@ -3032,7 +3047,7 @@ test "SampleIterator: stss marks sync samples" {
     var iter = SampleIterator.init(&stbl);
 
     try std.testing.expect(iter.next().?.is_sync); // sample 1
-    try std.testing.expect(!iter.next().?.is_sync); // sample 2
+    try std.testing.expect(!iter.next().?.is_sync); // sample 2\
     try std.testing.expect(iter.next().?.is_sync); // sample 3
     try std.testing.expect(!iter.next().?.is_sync); // sample 4
     try std.testing.expect(iter.next() == null);
@@ -3816,8 +3831,8 @@ test "Ctts: serialize-parse" {
     var ctts: Ctts = .empty;
     defer ctts.deinit(allocator);
 
-    try ctts.samples.append(allocator, .{ .count = 3, .offset = 0 });
-    try ctts.samples.append(allocator, .{ .count = 1, .offset = 100 });
+    try ctts.samples.append(allocator, .{ .count = 3, .delta = 0 });
+    try ctts.samples.append(allocator, .{ .count = 1, .delta = 100 });
 
     var wa: std.Io.Writer.Allocating = .init(allocator);
     defer wa.deinit();

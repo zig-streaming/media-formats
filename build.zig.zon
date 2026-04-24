@@ -3,8 +3,8 @@
     .version = "0.0.0",
     .dependencies = .{
         .media = .{
-            .url = "git+https://github.com/zig-streaming/media.git#9acf9420a48b18aa432ed3cfe597c81b32ae2077",
-            .hash = "media-0.0.0-qc-dCLTcAADZ9354gNh18Ymfu30I79W5jT6uhBsyYXsk",
+            .url = "git+https://github.com/zig-streaming/media?ref=v0.1.0#4ca931fd3306c219e396d524c03ebef8ddcde17f",
+            .hash = "media-0.1.0-qc-dCHrbAADMhWXQb3bPHZFHGlJgErdMhOT2kn8DGm_t",
         },
     },
     .fingerprint = 0x6c6b3c756160e6ed,

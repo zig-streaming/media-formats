@@ -81,14 +81,14 @@ pub fn main() !void {
 
     // Get the prefix length of each NAL unit
     const codec_config = trak.?.mdia.minf.stbl.stsd.entries.items[0].video.codec_config;
-    const nalu_length = switch (codec_config) {
-        .avc => |config| blk: {
-            if (config.len < 5) return error.InvalidCodecConfig;
-            break :blk config[4] & 0x03 + 1;
+    const nalu_length = switch (trak.?.codec()) {
+        .h264 => blk: {
+            if (codec_config.len < 5) return error.InvalidCodecConfig;
+            break :blk codec_config[4] & 0x03 + 1;
         },
-        .hvc => |config| blk: {
-            if (config.len < 22) return error.InvalidCodecConfig;
-            break :blk config[21] & 0x03 + 1;
+        .h265 => blk: {
+            if (codec_config.len < 22) return error.InvalidCodecConfig;
+            break :blk codec_config[21] & 0x03 + 1;
         },
         else => return error.UnsupportedCodec,
     };
@@ -96,9 +96,9 @@ pub fn main() !void {
     var iterator = try reader.sampleIterator(allocator, .{ .tracks = &[_]u32{trak.?.tkhd.track_id} });
     defer iterator.deinit();
 
-    const out_path = args_iterator.next() orelse switch (codec_config) {
-        .avc => "test.h264",
-        .hvc => "test.h265",
+    const out_path = args_iterator.next() orelse switch (trak.?.codec()) {
+        .h264 => "test.h264",
+        .h265 => "test.h265",
         else => unreachable,
     };
 
@@ -108,9 +108,9 @@ pub fn main() !void {
     var write_buffer: [4096]u8 = undefined;
     var writer = out_file.writer(&write_buffer);
 
-    switch (codec_config) {
-        .avc => |config| {
-            var ps_iterator = H264ParameterSetIterator.init(config[5..]);
+    switch (trak.?.codec()) {
+        .h264 => {
+            var ps_iterator = H264ParameterSetIterator.init(codec_config[5..]);
             while (ps_iterator.next()) |parameter_set| {
                 try writer.interface.writeAll(&[4]u8{ 0, 0, 0, 1 });
                 try writer.interface.writeAll(parameter_set);

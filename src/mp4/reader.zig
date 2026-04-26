@@ -5,12 +5,19 @@ const media = @import("media");
 const Io = std.Io;
 const Mp4Reader = @This();
 
+pub const Error = error{
+    FileNotFound,
+    InvalidFile,
+    UnsupportedFile,
+    Unseekable,
+} || std.Io.File.OpenError || box.ReadError;
+
 io: Io,
 file: Io.File,
 moov: box.Moov,
 
 /// Creates a new mp4 reader.
-pub fn init(io: Io, allocator: std.mem.Allocator, src: []const u8) !Mp4Reader {
+pub fn init(io: Io, allocator: std.mem.Allocator, src: []const u8) Error!Mp4Reader {
     const file = try Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
 
     var reader = Mp4Reader{
@@ -103,9 +110,8 @@ fn readMoov(self: *Mp4Reader, allocator: std.mem.Allocator) !void {
         }
     }
 
-    if (!moov_found) {
-        return error.InvalidFile;
-    }
+    if (!moov_found) return error.InvalidFile;
+    if (self.moov.mvex != null) return error.UnsupportedFile;
 }
 
 pub const StreamIterator = struct {
@@ -168,16 +174,32 @@ const Stream = struct {
     iterator: box.SampleIterator,
     timescale: u32,
     id: u32,
+
+    fn sampleOffset(self: *Stream) u64 {
+        if (self.iterator.peek()) |*sample| {
+            return sample.offset;
+        }
+
+        return std.math.maxInt(u64);
+    }
+
+    fn sampleDts(self: *Stream) u64 {
+        if (self.iterator.peek()) |*sample| {
+            return sample.dts;
+        }
+
+        return std.math.maxInt(u64);
+    }
 };
 
 pub const FrameIterator = struct {
     streams: []Stream,
     reader: Io.File.Reader,
     buffer: []u8,
+    min_stream: ?*Stream = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
-        // media_allocator: std.mem.Allocator,
         io: Io,
         file: Io.File,
         moov: *const box.Moov,
@@ -199,33 +221,12 @@ pub const FrameIterator = struct {
         };
 
         frame_iterator.reader = file.reader(io, frame_iterator.buffer);
+        frame_iterator.min_stream = frame_iterator.getMinStream();
         return frame_iterator;
     }
 
     pub fn next(self: *FrameIterator, media_allocator: std.mem.Allocator) !?media.Packet {
-        const min_stream: ?*Stream = blk: {
-            var min_dts: u64 = 0;
-            var result: ?*Stream = null;
-
-            for (self.streams) |*stream| {
-                if (stream.iterator.peek()) |*sample| {
-                    if (result == null) {
-                        result = stream;
-                        min_dts = sample.dts;
-                    } else {
-                        const dts = sample.dts * result.?.timescale / stream.timescale;
-                        if (dts < min_dts) {
-                            result = stream;
-                            min_dts = dts;
-                        }
-                    }
-                }
-            }
-
-            break :blk result;
-        };
-
-        if (min_stream) |stream| {
+        if (self.min_stream) |stream| {
             const sample_metadata = stream.iterator.next().?;
             var packet = try media.Packet.alloc(media_allocator, sample_metadata.size);
             errdefer packet.deinit(media_allocator);
@@ -239,6 +240,8 @@ pub const FrameIterator = struct {
             packet.flags.keyframe = sample_metadata.is_sync;
             packet.stream_id = stream.id;
 
+            self.min_stream = self.getMinStream();
+
             return packet;
         }
 
@@ -247,6 +250,21 @@ pub const FrameIterator = struct {
 
     pub fn deinit(self: *FrameIterator, allocator: std.mem.Allocator) void {
         allocator.free(self.streams);
+    }
+
+    fn getMinStream(self: *FrameIterator) ?*Stream {
+        var min_idx: usize = 0;
+        var min_dts = self.streams[0].sampleDts();
+
+        for (self.streams[1..], 1..) |*stream, idx| {
+            const stream_dts = stream.sampleDts();
+            if (stream_dts < min_dts) {
+                min_idx = idx;
+                min_dts = stream_dts;
+            }
+        }
+
+        return if (min_dts != std.math.maxInt(u64)) &self.streams[min_idx] else null;
     }
 };
 

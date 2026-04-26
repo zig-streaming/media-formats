@@ -47,11 +47,14 @@ pub const BoxType = enum(u32) {
 
 pub const WriteError = std.Io.Writer.Error;
 
-pub const BoxError = error{
+pub const ParseError = error{
     InvalidFtypBox,
     InvalidMoovBox,
     InvalidMvhdBox,
     InvalidTrakBox,
+    InvalidTkhdBox,
+    InvalidMehdBox,
+    InvalidTrexBox,
     InvalidMdiaBox,
     InvalidMdhdBox,
     InvalidHdlrBox,
@@ -61,12 +64,23 @@ pub const BoxError = error{
     InvalidDataEntryUrlBox,
     InvalidStblBox,
     InvalidStsdBox,
+    InvalidSttsBox,
+    InvalidCttsBox,
+    InvalidStssBox,
+    InvalidStszBox,
+    InvalidStscBox,
+    InvalidStcoBox,
+    InvalidCo64Box,
     InvalidVideoSampleEntry,
     InvalidAudioSampleEntry,
-    UnsupportedSampleEntry,
 };
 
-pub const Error = BoxError || WriteError;
+pub const ReadError = ParseError || std.Io.Reader.Error || Allocator.Error;
+
+pub const SampleEntryWriteError = WriteError || error{
+    InvalidVideoSampleEntry,
+    InvalidAudioSampleEntry,
+};
 
 /// The type of a track, determined by the handler type in the Hdlr box.
 pub const TrakType = enum { video, audio, hint, unknown };
@@ -92,7 +106,7 @@ pub const Header = struct {
         return @as(usize, self.size) - (if (self.type == .uuid) @as(usize, 16) else @as(usize, 0)) -| Header.box_header_size;
     }
 
-    pub fn parse(reader: *Reader) !Header {
+    pub fn parse(reader: *Reader) ReadError!Header {
         var size: u64 = try reader.takeInt(u32, .big);
         const box_type: BoxType = @enumFromInt(try reader.takeInt(u32, .big));
 
@@ -139,7 +153,7 @@ pub const Ftyp = struct {
         return Header.box_header_size + 8 + self.compatible_brands.items.len * 4;
     }
 
-    pub fn parse(allocator: Allocator, reader: *std.Io.Reader, box_size: usize) !Ftyp {
+    pub fn parse(allocator: Allocator, reader: *std.Io.Reader, box_size: usize) ReadError!Ftyp {
         if (@rem(box_size, 4) != 0) {
             return error.InvalidFtypBox;
         }
@@ -187,7 +201,7 @@ pub const Moov = struct {
         return Header.box_header_size + self.mvhd.size() + traks_size + mvex_size;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *std.Io.Reader) !Moov {
+    pub fn parse(allocator: Allocator, header: Header, reader: *std.Io.Reader) ReadError!Moov {
         var offset: usize = 0;
         var mvhd: ?Mvhd = null;
         var traks: std.ArrayList(Trak) = .empty;
@@ -210,7 +224,7 @@ pub const Moov = struct {
         return .{ .mvhd = mvhd.?, .traks = traks };
     }
 
-    pub fn write(self: *const Moov, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Moov, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const header = Header.new(.moov, self.size());
         try header.write(writer);
         try self.mvhd.write(writer);
@@ -237,7 +251,7 @@ pub const Mvhd = struct {
         return Header.full_box_header_size + 80 + @as(u8, if (self.version == 1) 28 else 16);
     }
 
-    pub fn parse(header: Header, reader: *std.Io.Reader) !Mvhd {
+    pub fn parse(header: Header, reader: *std.Io.Reader) ReadError!Mvhd {
         const version = try reader.takeByte();
         var mvhd = Mvhd{ .version = version, .timescale = 0 };
 
@@ -262,7 +276,7 @@ pub const Mvhd = struct {
         return mvhd;
     }
 
-    pub fn write(self: *const Mvhd, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Mvhd, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.mvhd, self.size());
         try header.write(writer);
         try writer.writeByte(self.version);
@@ -310,7 +324,7 @@ pub const Trak = struct {
     }
 
     /// Parses the Track Box (trak).
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Trak {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Trak {
         var offset: usize = 0;
         var tkhd: ?Tkhd = null;
         var mdia: ?Mdia = null;
@@ -330,7 +344,7 @@ pub const Trak = struct {
         return .{ .tkhd = tkhd.?, .mdia = mdia.? };
     }
 
-    pub fn write(self: *const Trak, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Trak, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const header = Header.new(.trak, self.size());
         try header.write(writer);
         try self.tkhd.write(writer);
@@ -398,7 +412,7 @@ pub const Mvex = struct {
         return Header.box_header_size + trex_size + if (self.mehd) |*box| box.size() else 0;
     }
 
-    pub fn parse(allocator: Allocator, reader: *Reader, header: Header) !Mvex {
+    pub fn parse(allocator: Allocator, reader: *Reader, header: Header) ReadError!Mvex {
         var offset: usize = 0;
         var mvex = Mvex{ .mehd = null, .trex = .empty };
         errdefer mvex.deinit(allocator);
@@ -417,7 +431,7 @@ pub const Mvex = struct {
         return mvex;
     }
 
-    pub fn write(self: *const Mvex, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Mvex, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.mvex, self.size());
         try header.write(writer);
         if (self.mehd) |*box| try box.write(writer);
@@ -437,9 +451,9 @@ pub const Mehd = struct {
         return Header.full_box_header_size + (self.version + 1) * 4;
     }
 
-    pub fn parse(reader: *Reader, header: Header) !Mehd {
+    pub fn parse(reader: *Reader, header: Header) ReadError!Mehd {
         var mhed = Mehd{ .version = try reader.takeByte(), .fragment_duration = 0 };
-        if (mhed.size() != header.size) return error.InvalidMvhdBox;
+        if (mhed.size() != header.size) return error.InvalidMehdBox;
 
         try reader.discardAll(3); // flags
 
@@ -452,7 +466,7 @@ pub const Mehd = struct {
         return mhed;
     }
 
-    pub fn write(self: *const Mehd, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Mehd, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.mehd, self.size());
         try header.write(writer);
         try writer.writeByte(self.version);
@@ -477,7 +491,7 @@ pub const Trex = struct {
         return Header.full_box_header_size + 20;
     }
 
-    pub fn parse(reader: *Reader, header: Header) !Trex {
+    pub fn parse(reader: *Reader, header: Header) ReadError!Trex {
         var trex = Trex{
             .track_id = 0,
             .default_sample_description_index = 0,
@@ -486,7 +500,7 @@ pub const Trex = struct {
             .default_sample_flags = 0,
         };
 
-        if (trex.size() != header.size) return error.InvalidMvhdBox;
+        if (trex.size() != header.size) return error.InvalidTrexBox;
 
         try reader.discardAll(4); // version + flags
         trex.track_id = try reader.takeInt(u32, .big);
@@ -498,7 +512,7 @@ pub const Trex = struct {
         return trex;
     }
 
-    pub fn write(self: *const Trex, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Trex, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.trex, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -534,7 +548,7 @@ pub const Tkhd = struct {
         return Header.full_box_header_size + 60 + @as(u8, if (self.version == 1) 32 else 20);
     }
 
-    pub fn parse(reader: *Reader, header: Header) !Tkhd {
+    pub fn parse(reader: *Reader, header: Header) ReadError!Tkhd {
         const version = try reader.takeByte();
         var tkhd = Tkhd{
             .version = version,
@@ -571,7 +585,7 @@ pub const Tkhd = struct {
         return tkhd;
     }
 
-    pub fn write(self: *const Tkhd, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Tkhd, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.tkhd, self.size());
         try header.write(writer);
         try writer.writeByte(self.version);
@@ -616,7 +630,7 @@ pub const Mdia = struct {
         return Header.box_header_size + self.mdhd.size() + self.hdlr.size() + self.minf.size();
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Mdia {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Mdia {
         var offset: usize = 0;
         var mdhd: ?Mdhd = null;
         var hdlr: ?Hdlr = null;
@@ -640,7 +654,7 @@ pub const Mdia = struct {
         return .{ .mdhd = mdhd.?, .hdlr = hdlr.?, .minf = minf.? };
     }
 
-    pub fn write(self: *const Mdia, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Mdia, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const header = Header.new(.mdia, self.size());
         try header.write(writer);
         try self.mdhd.write(writer);
@@ -665,7 +679,7 @@ pub const Mdhd = struct {
         return Header.full_box_header_size + @as(u8, if (self.version == 1) 28 else 16) + 4;
     }
 
-    pub fn parse(header: Header, reader: *Reader) !Mdhd {
+    pub fn parse(header: Header, reader: *Reader) ReadError!Mdhd {
         const version = try reader.takeByte();
         var mdhd = Mdhd{
             .version = version,
@@ -697,7 +711,7 @@ pub const Mdhd = struct {
         return mdhd;
     }
 
-    pub fn write(self: *const Mdhd, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Mdhd, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.mdhd, self.size());
         try header.write(writer);
         try writer.writeByte(self.version);
@@ -733,7 +747,7 @@ pub const Hdlr = struct {
         return Header.full_box_header_size + 20 + self.name.len + 1;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Hdlr {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Hdlr {
         var hdlr = Hdlr{
             .handler_type = 0,
             .name = &.{},
@@ -754,7 +768,7 @@ pub const Hdlr = struct {
         return hdlr;
     }
 
-    pub fn write(self: *const Hdlr, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Hdlr, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.hdlr, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // flags
@@ -781,7 +795,7 @@ pub const Minf = struct {
         return Header.box_header_size + self.stbl.size() + self.dinf.size() + self.handler.size();
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Minf {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Minf {
         var offset: usize = 0;
         var stbl: ?Stbl = null;
         var dinf: ?Dinf = null;
@@ -812,7 +826,7 @@ pub const Minf = struct {
         return .{ .stbl = stbl.?, .dinf = dinf.?, .handler = handler };
     }
 
-    pub fn write(self: *const Minf, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Minf, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const header = Header.new(.minf, self.size());
         try header.write(writer);
         try self.handler.write(writer);
@@ -843,13 +857,13 @@ pub const Dinf = struct {
         return Header.box_header_size + self.dref.size();
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Dinf {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Dinf {
         const inner_header = try Header.parse(reader);
         if (inner_header.type != .dref or header.payloadSize() != inner_header.size) return error.InvalidDinfBox;
         return .{ .dref = try Dref.parse(allocator, inner_header, reader) };
     }
 
-    pub fn write(self: *const Dinf, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Dinf, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.dinf, self.size());
         try header.write(writer);
         try self.dref.write(writer);
@@ -865,7 +879,7 @@ pub const Dref = struct {
         return Header.full_box_header_size + 4 + entries_size;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Dref {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Dref {
         if (header.payloadSize() < 8) return error.InvalidDrefBox;
 
         _ = try reader.discard(.limited(4)); // version + flags
@@ -892,7 +906,7 @@ pub const Dref = struct {
         return dref;
     }
 
-    pub fn write(self: *const Dref, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Dref, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.dref, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // flags
@@ -913,7 +927,7 @@ pub const DataEntryUrl = struct {
         return Header.full_box_header_size + self.url.len;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !DataEntryUrl {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!DataEntryUrl {
         if (header.payloadSize() < 4) return error.InvalidDataEntryUrlBox;
 
         _ = try reader.discard(.limited(4)); // version + flags
@@ -927,7 +941,7 @@ pub const DataEntryUrl = struct {
         return box;
     }
 
-    pub fn write(self: *const DataEntryUrl, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const DataEntryUrl, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.@"url ", self.size());
         try header.write(writer);
         try writer.writeInt(u32, 1, .big); // flags (indicates that the media data is in the same file)
@@ -952,7 +966,7 @@ pub const MediaHandler = union(enum) {
         };
     }
 
-    pub fn write(self: *const MediaHandler, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const MediaHandler, writer: *std.Io.Writer) WriteError!void {
         switch (self.*) {
             .video => try self.video.write(writer),
             .audio => try self.audio.write(writer),
@@ -966,7 +980,7 @@ pub const Vmhd = struct {
         return Header.full_box_header_size + 8;
     }
 
-    pub fn write(self: *const Vmhd, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Vmhd, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.vmhd, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // flags
@@ -980,7 +994,7 @@ pub const Smhd = struct {
         return Header.full_box_header_size + 4;
     }
 
-    pub fn write(self: *const Smhd, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Smhd, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.smhd, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // flags
@@ -1031,7 +1045,7 @@ pub const Stbl = struct {
             self.stsz.size() + self.stsc.size() + ctts_size + stss_size + stco_size + co64_size;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Stbl {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stbl {
         var offset: usize = 0;
         var stsd: ?Stsd = null;
         var stts: ?Stts = null;
@@ -1087,7 +1101,7 @@ pub const Stbl = struct {
         };
     }
 
-    pub fn write(self: *const Stbl, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Stbl, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const header = Header.new(.stbl, self.size());
         try header.write(writer);
         try self.stsd.write(writer);
@@ -1150,7 +1164,7 @@ pub const Stsd = struct {
         return Header.full_box_header_size + 4 + entries_size;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Stsd {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stsd {
         if (header.payloadSize() < 8) return error.InvalidStsdBox;
 
         _ = try reader.discard(.limited(4)); // version + flags
@@ -1177,7 +1191,7 @@ pub const Stsd = struct {
         return stsd;
     }
 
-    pub fn write(self: *const Stsd, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Stsd, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const header = Header.new(.stsd, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -1205,7 +1219,7 @@ pub const SampleEntry = union(enum) {
         }
     }
 
-    pub fn write(self: *const SampleEntry, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const SampleEntry, writer: *std.Io.Writer) SampleEntryWriteError!void {
         switch (self.*) {
             .video => |v| try v.write(writer),
             .audio => |a| try a.write(writer),
@@ -1244,7 +1258,7 @@ pub const VideoSampleEntry = struct {
         return Header.box_header_size + 78 + codec_config_size;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !VideoSampleEntry {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!VideoSampleEntry {
         if (header.payloadSize() < 78) return error.InvalidVideoSampleEntry;
 
         _ = try reader.discard(.limited(6)); // reserved
@@ -1291,7 +1305,7 @@ pub const VideoSampleEntry = struct {
         return sample_entry;
     }
 
-    pub fn write(self: *const VideoSampleEntry, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const VideoSampleEntry, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const box_type: BoxType = switch (self.codec) {
             .h264 => .avc1,
             .h265 => .hvc1,
@@ -1378,7 +1392,7 @@ pub const AudioSampleEntry = struct {
         return Header.box_header_size + 28 + codec_config_size;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !AudioSampleEntry {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!AudioSampleEntry {
         if (header.payloadSize() < 28) return error.InvalidAudioSampleEntry;
 
         _ = try reader.discard(.limited(6)); // reserved
@@ -1422,7 +1436,7 @@ pub const AudioSampleEntry = struct {
         return sample_entry;
     }
 
-    pub fn write(self: *const AudioSampleEntry, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const AudioSampleEntry, writer: *std.Io.Writer) SampleEntryWriteError!void {
         const box_type = switch (self.codec) {
             .aac => .mp4a,
             else => return error.InvalidAudioSampleEntry,
@@ -1496,7 +1510,7 @@ pub const Stts = struct {
         return Header.full_box_header_size + 4 + self.samples.items.len * 8;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Stts {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stts {
         if (header.payloadSize() < 8) return error.InvalidSttsBox;
 
         _ = try reader.discard(.limited(4)); // version + flags
@@ -1514,7 +1528,7 @@ pub const Stts = struct {
         return stts;
     }
 
-    pub fn write(self: *const Stts, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Stts, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.stts, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -1554,7 +1568,7 @@ pub const Ctts = struct {
         return Header.full_box_header_size + 4 + self.samples.items.len * @sizeOf(CompositionTimeToSampleEntry);
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Ctts {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Ctts {
         if (header.payloadSize() < 8) return error.InvalidCttsBox;
 
         const version = try reader.takeByte();
@@ -1571,7 +1585,7 @@ pub const Ctts = struct {
         return ctts;
     }
 
-    pub fn write(self: *const Ctts, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Ctts, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.ctts, self.size());
         try header.write(writer);
         try writer.writeInt(u8, self.version, .big);
@@ -1609,7 +1623,7 @@ pub const Stss = struct {
         return Header.full_box_header_size + 4 + self.samples.items.len * 4;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Stss {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stss {
         if (header.payloadSize() < 8) return error.InvalidStssBox;
 
         reader.toss(4); // version + flags
@@ -1629,7 +1643,7 @@ pub const Stss = struct {
         return stss;
     }
 
-    pub fn write(self: *const Stss, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Stss, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.stss, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -1659,7 +1673,7 @@ pub const Stsz = struct {
         return Header.full_box_header_size + 8 + self.samples.items.len * 4;
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Stsz {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stsz {
         if (header.payloadSize() < 12) return error.InvalidStszBox;
 
         _ = try reader.discard(.limited(4)); // version + flags
@@ -1684,7 +1698,7 @@ pub const Stsz = struct {
         return stsz;
     }
 
-    pub fn write(self: *const Stsz, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Stsz, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.stsz, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -1726,7 +1740,7 @@ pub const Stsc = struct {
         return Header.full_box_header_size + 4 + self.entries.items.len * @sizeOf(SampleToChunkEntry);
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Stsc {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stsc {
         if (header.payloadSize() < 8) return error.InvalidStscBox;
 
         _ = try reader.discard(.limited(4)); // version + flags
@@ -1741,7 +1755,7 @@ pub const Stsc = struct {
         return stsc;
     }
 
-    pub fn write(self: *const Stsc, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Stsc, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.stsc, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -1776,7 +1790,7 @@ pub const Stco = struct {
         return Header.full_box_header_size + 4 + self.entries.items.len * @sizeOf(u32);
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Stco {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stco {
         if (header.payloadSize() < 8) return error.InvalidStcoBox;
 
         reader.toss(4); // version + flags
@@ -1791,7 +1805,7 @@ pub const Stco = struct {
         return stco;
     }
 
-    pub fn write(self: *const Stco, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Stco, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.stco, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -1813,7 +1827,7 @@ pub const Co64 = struct {
         return Header.full_box_header_size + 4 + self.entries.items.len * @sizeOf(u64);
     }
 
-    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) !Co64 {
+    pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Co64 {
         if (header.payloadSize() < 8) return error.InvalidCo64Box;
 
         reader.toss(4); // version + flags
@@ -1832,7 +1846,7 @@ pub const Co64 = struct {
         return co64;
     }
 
-    pub fn write(self: *const Co64, writer: *std.Io.Writer) !void {
+    pub fn write(self: *const Co64, writer: *std.Io.Writer) WriteError!void {
         const header = Header.new(.co64, self.size());
         try header.write(writer);
         try writer.writeInt(u32, 0, .big); // version + flags
@@ -4187,7 +4201,7 @@ test "Mhed: rejects invalid size" {
     };
     var reader = Reader.fixed(&data);
     const header = try Header.parse(&reader);
-    try std.testing.expectError(error.InvalidMvhdBox, Mehd.parse(&reader, header));
+    try std.testing.expectError(error.InvalidMehdBox, Mehd.parse(&reader, header));
 }
 
 test "Trex: serialize-parse" {
@@ -4227,7 +4241,7 @@ test "Trex: rejects invalid size" {
     };
     var reader = Reader.fixed(&data);
     const header = try Header.parse(&reader);
-    try std.testing.expectError(error.InvalidMvhdBox, Trex.parse(&reader, header));
+    try std.testing.expectError(error.InvalidTrexBox, Trex.parse(&reader, header));
 }
 
 test "Mvex: serialize-parse with mehd and single trex" {

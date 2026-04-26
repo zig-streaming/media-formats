@@ -49,6 +49,7 @@ pub fn build(b: *std.Build) void {
                     .optimize = .ReleaseSafe,
                     .imports = &.{
                         .{ .name = "formats", .module = mod },
+                        .{ .name = "media", .module = media.module("media") },
                     },
                 }),
             });

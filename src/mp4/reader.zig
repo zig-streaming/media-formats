@@ -17,8 +17,9 @@ file: Io.File,
 moov: box.Moov,
 
 /// Creates a new mp4 reader.
-pub fn init(io: Io, allocator: std.mem.Allocator, src: []const u8) Error!Mp4Reader {
-    const file = try Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
+pub fn init(io: Io, allocator: std.mem.Allocator, dir: ?Io.Dir, src: []const u8) Error!Mp4Reader {
+    const base_dir = dir orelse Io.Dir.cwd();
+    const file = try base_dir.openFile(io, src, .{ .mode = .read_only });
 
     var reader = Mp4Reader{
         .io = io,
@@ -140,6 +141,8 @@ pub const StreamIterator = struct {
             .id = trak.tkhd.track_id,
             .time_base = .{ .num = 1, .den = trak.timescale() },
             .codec = trak.codec(),
+            .duration = trak.mdia.mdhd.duration,
+            .nb_frames = trak.sampleCount(),
             .config = switch (trak.mediaType()) {
                 .video => .{
                     .video = media.VideoConfig{
@@ -278,7 +281,7 @@ test "Mp4Reader: init parses moov and deinit releases memory" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     try testing.expectEqual(1000, reader.moov.mvhd.timescale);
@@ -291,7 +294,7 @@ test "Mp4Reader: init returns FileNotFound for missing file" {
 
     try testing.expectError(
         error.FileNotFound,
-        Mp4Reader.init(io, allocator, "/nonexistent/path/does_not_exist.mp4"),
+        Mp4Reader.init(io, allocator, null, "/nonexistent/path/does_not_exist.mp4"),
     );
 }
 
@@ -299,7 +302,7 @@ test "Mp4Reader: streamIterator yields video then audio then null" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     var it = reader.streamIterator();
@@ -328,7 +331,7 @@ test "Mp4Reader: readFrame returns first video keyframe" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     var packet = (try reader.readFrame(allocator, 1, 0)).?;
@@ -346,7 +349,7 @@ test "Mp4Reader: readFrame reads middle video frame at correct offset" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     var packet = (try reader.readFrame(allocator, 1, 1)).?;
@@ -361,7 +364,7 @@ test "Mp4Reader: readFrame reads first audio frame" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     var packet = (try reader.readFrame(allocator, 2, 0)).?;
@@ -375,7 +378,7 @@ test "Mp4Reader: readFrame returns null for unknown stream id" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     try testing.expectEqual(null, try reader.readFrame(allocator, 999, 0));
@@ -385,7 +388,7 @@ test "Mp4Reader: readFrame returns null for out-of-range frame index" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     try testing.expectEqual(null, reader.readFrame(allocator, 1, 999));
@@ -395,7 +398,7 @@ test "Mp4Reader: frameIterator yields all frames across streams" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     var buffer: [1024]u8 = undefined;
@@ -430,7 +433,7 @@ test "Mp4Reader: frameIterator exhausted returns null" {
     const allocator = testing.allocator;
     const io = testing.io;
 
-    var reader = try Mp4Reader.init(io, allocator, "fixtures/sample.mp4");
+    var reader = try Mp4Reader.init(io, allocator, null, "fixtures/sample.mp4");
     defer reader.deinit(allocator);
 
     var buffer: [1024]u8 = undefined;

@@ -526,11 +526,11 @@ pub const Trex = struct {
 
 /// The Track Header Box (tkhd) contains information about a track, including its dimensions, duration, and creation/modification times.
 pub const Tkhd = struct {
-    version: u8,
-    creation_time: u64,
-    modification_time: u64,
+    version: u8 = 0,
+    creation_time: u64 = 0,
+    modification_time: u64 = 0,
     track_id: u32,
-    duration: u64,
+    duration: u64 = 0,
     width: u32,
     height: u32,
 
@@ -674,6 +674,15 @@ pub const Mdhd = struct {
     timescale: u32,
     duration: u64,
     language: [3]u8,
+
+    pub fn default(timescale: u32) Mdhd {
+        return .{
+            .timescale = timescale,
+            .duration = 0,
+            .language = [_]u8{ 'u', 'n', 'd' },
+            .version = 0,
+        };
+    }
 
     pub fn size(self: *const Mdhd) usize {
         return Header.full_box_header_size + @as(u8, if (self.version == 1) 28 else 16) + 4;
@@ -1127,8 +1136,10 @@ pub const Stbl = struct {
         try self.stsz.addSample(allocator, sample.size);
 
         const offset: i32 = @intCast(@as(i128, sample.pts) - @as(i128, sample.dts));
-        if (offset < 0) self.ctts.?.version = 1;
-        try self.ctts.?.addDelta(allocator, @bitCast(offset));
+        if (self.ctts) |*ctts| {
+            if (offset < 0) ctts.version = 1;
+            try ctts.addDelta(allocator, @bitCast(offset));
+        }
 
         switch (self.stsd.entries.items[0]) {
             .video => if (sample.is_sync) try self.stss.?.samples.append(allocator, self.stsz.sample_count),
@@ -1350,30 +1361,13 @@ pub const VideoSampleEntry = struct {
     }
 
     pub fn clone(self: *const VideoSampleEntry, allocator: Allocator) Allocator.Error!VideoSampleEntry {
-        var entry = VideoSampleEntry{
+        return VideoSampleEntry{
             .codec = self.codec,
             .data_reference_index = self.data_reference_index,
             .width = self.width,
             .height = self.height,
-            .codec_config = .{ .unknown = {} },
+            .codec_config = try allocator.dupe(u8, self.codec_config),
         };
-
-        switch (self.codec_config) {
-            .avc => |config| {
-                const config_copy = try allocator.alloc(u8, config.len);
-                @memcpy(config_copy, config);
-                entry.codec_config = .{ .avc = config_copy };
-            },
-            .hvc => |config| {
-                const config_copy = try allocator.alloc(u8, config.len);
-                @memcpy(config_copy, config);
-                entry.codec_config = .{ .hvc = config_copy };
-            },
-            .unknown => {},
-            else => unreachable,
-        }
-
-        return entry;
     }
 };
 
@@ -1471,26 +1465,14 @@ pub const AudioSampleEntry = struct {
     }
 
     pub fn clone(self: *const AudioSampleEntry, allocator: Allocator) !AudioSampleEntry {
-        var entry = AudioSampleEntry{
+        return .{
             .codec = self.codec,
             .data_reference_index = self.data_reference_index,
             .channelcount = self.channelcount,
             .samplesize = self.samplesize,
             .samplerate = self.samplerate,
-            .codec_config = .{ .unknown = {} },
+            .codec_config = try allocator.dupe(u8, self.codec_config),
         };
-
-        switch (self.codec_config) {
-            .esds => |config| {
-                const config_copy = try allocator.alloc(u8, config.len);
-                @memcpy(config_copy, config);
-                entry.codec_config = .{ .esds = config_copy };
-            },
-            .unknown => {},
-            else => unreachable,
-        }
-
-        return entry;
     }
 };
 
@@ -1610,6 +1592,11 @@ pub const Ctts = struct {
         }
 
         try self.samples.append(allocator, .{ .count = 1, .delta = offset });
+    }
+
+    pub fn isEmpty(self: *const Ctts) bool {
+        const items = self.samples.items;
+        return items.len == 0 or (items.len == 1 and items[0].delta == 0);
     }
 };
 

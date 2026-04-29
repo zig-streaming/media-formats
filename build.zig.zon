@@ -6,7 +6,6 @@
             .url = "git+https://github.com/zig-streaming/media.git#6c0a530fc5a7f44f21409a616d14516851d78861",
             .hash = "media-0.1.0-qc-dCMfmAABbB0osGNBy54a98L0vDbsyTQNCFqEtS3-M",
         },
-        },
     },
     .fingerprint = 0x6c6b3c756160e6ed,
     .minimum_zig_version = "0.16.0",

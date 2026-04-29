@@ -78,7 +78,10 @@ pub fn writeHeader(self: *Mp4Writer) Io.Writer.Error!void {
 /// Adds a new stream to the file.
 pub fn addStream(self: *Mp4Writer, stream: *const media.Stream) Error!void {
     const trak = try self.moov.traks.addOne(self.allocator);
-    trak.* = try self.streamToTrak(stream);
+    trak.* = self.streamToTrak(stream) catch |err| {
+        _ = self.moov.traks.swapRemove(self.streams.items.len);
+        return err;
+    };
 
     try self.streams.append(self.allocator, .{
         .id = stream.id,

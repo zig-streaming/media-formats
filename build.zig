@@ -49,14 +49,12 @@ pub fn build(b: *std.Build) void {
                     .optimize = .ReleaseSafe,
                     .imports = &.{
                         .{ .name = "formats", .module = mod },
+                        .{ .name = "media", .module = media.module("media") },
                     },
                 }),
             });
 
-            b.installArtifact(exe);
-
             const run_cmd = b.addRunArtifact(exe);
-            run_cmd.step.dependOn(b.getInstallStep());
             if (b.args) |args| {
                 run_cmd.addArgs(args);
             }

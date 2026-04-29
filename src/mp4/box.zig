@@ -367,12 +367,12 @@ pub const Trak = struct {
 
     /// Returns the width of the track in pixels, converting from fixed-point 16.16 format.
     pub fn width(self: *const Trak) u16 {
-        return @intCast(self.tkhd.width >> 16);
+        return self.tkhd.width;
     }
 
     /// Returns the height of the track in pixels, converting from fixed-point 16.16 format.
     pub fn height(self: *const Trak) u16 {
-        return @intCast(self.tkhd.height >> 16);
+        return self.tkhd.height;
     }
 
     /// Returns the sample count.
@@ -531,8 +531,8 @@ pub const Tkhd = struct {
     modification_time: u64 = 0,
     track_id: u32,
     duration: u64 = 0,
-    width: u32,
-    height: u32,
+    width: u16,
+    height: u16,
 
     pub const empty = Tkhd{
         .version = 0,
@@ -579,8 +579,8 @@ pub const Tkhd = struct {
         }
 
         _ = try reader.discard(.limited(52)); // reserved + matrix
-        tkhd.width = try reader.takeInt(u32, .big);
-        tkhd.height = try reader.takeInt(u32, .big);
+        tkhd.width = @intCast(try reader.takeInt(u32, .big) >> 16);
+        tkhd.height = @intCast(try reader.takeInt(u32, .big) >> 16);
 
         return tkhd;
     }
@@ -615,8 +615,8 @@ pub const Tkhd = struct {
         };
         try writer.writeSliceEndian(u32, &matrix, .big);
 
-        try writer.writeInt(u32, self.width, .big);
-        try writer.writeInt(u32, self.height, .big);
+        try writer.writeInt(u32, @as(u32, self.width) << 16, .big);
+        try writer.writeInt(u32, @as(u32, self.height) << 16, .big);
     }
 };
 
@@ -2230,12 +2230,13 @@ test "Mvhd: rejects invalid box size" {
 
 test "Moov: parse moov" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
-    var fs = try std.fs.cwd().openFile("fixtures/moov.bin", .{ .mode = .read_only });
-    defer fs.close();
+    var fs = try std.Io.Dir.cwd().openFile(io, "fixtures/moov.bin", .{ .mode = .read_only });
+    defer fs.close(io);
 
     var buffer: [128]u8 = @splat(0);
-    var fs_reader = fs.reader(&buffer);
+    var fs_reader = fs.reader(io, &buffer);
     const reader = &fs_reader.interface;
 
     const header = try Header.parse(reader);
@@ -2270,12 +2271,13 @@ test "Moov: parse moov" {
 test "Moov: allocation error" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
     const allocator = failing_allocator.allocator();
+    const io = std.testing.io;
 
-    var fs = try std.fs.cwd().openFile("fixtures/moov.bin", .{ .mode = .read_only });
-    defer fs.close();
+    var fs = try std.Io.Dir.cwd().openFile(io, "fixtures/moov.bin", .{ .mode = .read_only });
+    defer fs.close(io);
 
     var buffer: [64]u8 = undefined;
-    var fs_reader = fs.reader(&buffer);
+    var fs_reader = fs.reader(io, &buffer);
     const reader = &fs_reader.interface;
 
     const header = try Header.parse(reader);
@@ -3109,16 +3111,15 @@ test "Tkhd: version 0 parse" {
     const data = [_]u8{
         0x00, 0x00, 0x00, 0x5C, // size = 92
         't',  'k',  'h',  'd',
-        0x00, // version = 0
-        0x00, 0x00, 0x00, // flags
+        0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x01, // creation_time = 1
         0x00, 0x00, 0x00, 0x02, // modification_time = 2
         0x00, 0x00, 0x00, 0x03, // track_id = 3
         0x00, 0x00, 0x00, 0x00, // reserved
         0x00, 0x00, 0x02, 0xBC, // duration = 700
     } ++ [_]u8{0} ** 52 ++ [_]u8{ // reserved + matrix
-        0x00, 0x07, 0x80, 0x00, // width = 1920 in 16.16 fixed-point
-        0x00, 0x04, 0x38, 0x00, // height = 1080 in 16.16 fixed-point
+        0x07, 0x80, 0x00, 0x00, // width = 1920 in 16.16 fixed-point
+        0x04, 0x38, 0x00, 0x00, // height = 1080 in 16.16 fixed-point
     };
     var reader = Reader.fixed(&data);
     const header = try Header.parse(&reader);
@@ -3129,8 +3130,8 @@ test "Tkhd: version 0 parse" {
     try std.testing.expectEqual(@as(u64, 2), tkhd.modification_time);
     try std.testing.expectEqual(@as(u32, 3), tkhd.track_id);
     try std.testing.expectEqual(@as(u64, 700), tkhd.duration);
-    try std.testing.expectEqual(@as(u32, 0x00078000), tkhd.width);
-    try std.testing.expectEqual(@as(u32, 0x00043800), tkhd.height);
+    try std.testing.expectEqual(1920, tkhd.width);
+    try std.testing.expectEqual(1080, tkhd.height);
 }
 
 test "Tkhd: version 1 parse" {
@@ -3660,8 +3661,8 @@ test "Tkhd: serialize-parse v0" {
         .modification_time = 2,
         .track_id = 3,
         .duration = 700,
-        .width = 1920 << 16,
-        .height = 1080 << 16,
+        .width = 1920,
+        .height = 1080,
     };
 
     var wa: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -3684,8 +3685,8 @@ test "Tkhd: serialize-parse v1" {
         .modification_time = 2,
         .track_id = 5,
         .duration = 3000,
-        .width = 1920 << 16,
-        .height = 1080 << 16,
+        .width = 1920,
+        .height = 1080,
     };
 
     var wa: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -4110,12 +4111,13 @@ test "AudioSampleEntry: serialize-parse mp4a with esds config" {
 
 test "Moov: serialize-parse" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
-    var fs = try std.fs.cwd().openFile("fixtures/moov.bin", .{ .mode = .read_only });
-    defer fs.close();
+    var fs = try std.Io.Dir.cwd().openFile(io, "fixtures/moov.bin", .{ .mode = .read_only });
+    defer fs.close(io);
 
     var buffer: [128]u8 = @splat(0);
-    var fs_reader = fs.reader(&buffer);
+    var fs_reader = fs.reader(io, &buffer);
     const reader = &fs_reader.interface;
 
     const header = try Header.parse(reader);
